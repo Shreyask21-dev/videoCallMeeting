@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Chat</title>
+    <style>
+        /* Style for chat box and messages */
+        #chatBox {
+            max-height: 200px;
+            overflow-y: auto;
+            border: 1px solid #ccc;
+            padding: 10px;
+            margin-bottom: 10px;
+            width: 300px;
+        }
+        #messageInput {
+            width: 80%;
+        }
+        #sendBtn {
+            width: 18%;
+        }
+    </style>
+</head>
+<body>
+    <h1>Video Chat Room</h1>
+    
+    <!-- Local video -->
+    <video id="localVideo" autoplay playsinline muted></video>
+    
+    <!-- Remote video -->
+    <video id="remoteVideo" autoplay playsinline></video>
+
+    <!-- Control Buttons -->
+    <div>
+        <button id="toggleVideo">Turn Video Off</button>
+        <button id="toggleMic">Mute Mic</button>
+        <button id="shareScreen">Share Screen</button>
+        <button id="leaveRoom">Leave Room</button> <!-- New Leave button -->
+    </div>
+
+    <!-- Chat Section -->
+    <div>
+        <div id="chatBox"></div>
+        <input type="text" id="messageInput" placeholder="Type a message...">
+        <button id="sendBtn">Send</button>
+    </div>
+
+    <script>
+        const roomId = window.location.pathname.split('/').pop();
+        const ws = new WebSocket(`ws://${window.location.hostname}:3000`);
+
+        let localStream;
+        let remoteStream;
+        let peerConnection;
+        let screenStream;
+        let isScreenSharing = false;
+
+        const config = {
+            iceServers: [
+                { urls: "stun:stun.l.google.com:19302" },
+            ],
+        };
+
+        const localVideo = document.getElementById('localVideo');
+        const remoteVideo = document.getElementById('remoteVideo');
+        const toggleVideoBtn = document.getElementById('toggleVideo');
+        const toggleMicBtn = document.getElementById('toggleMic');
+        const shareScreenBtn = document.getElementById('shareScreen');
+        const leaveRoomBtn = document.getElementById('leaveRoom');
+        const messageInput = document.getElementById('messageInput');
+        const sendBtn = document.getElementById('sendBtn');
+        const chatBox = document.getElementById('chatBox');
+
+        async function start() {
+            try {
+                // Get local media stream
+                localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                localVideo.srcObject = localStream;
+
+                // Initialize peer connection
+                peerConnection = new RTCPeerConnection(config);
+
+                // Add local stream to peer connection
+                localStream.getTracks().forEach((track) => {
+                    peerConnection.addTrack(track, localStream);
+                });
+
+                // Handle remote stream
+                peerConnection.ontrack = (event) => {
+                    if (!remoteStream) {
+                        remoteStream = new MediaStream();
+                        remoteVideo.srcObject = remoteStream;
+                    }
+                    remoteStream.addTrack(event.track);
+                };
+
+                // Send ICE candidates to the server
+                peerConnection.onicecandidate = (event) => {
+                    if (event.candidate) {
+                        ws.send(JSON.stringify({
+                            roomId,
+                            type: 'candidate',
+                            payload: event.candidate,
+                        }));
+                    }
+                };
+
+                ws.onopen = () => {
+                    console.log('WebSocket connection established');
+                    ws.send(JSON.stringify({ roomId, type: 'join' }));
+                };
+
+                ws.onmessage = async (message) => {
+                    const data = JSON.parse(message.data);
+
+                    if (data.type === 'offer') {
+                        await peerConnection.setRemoteDescription(new RTCSessionDescription(data.payload));
+                        const answer = await peerConnection.createAnswer();
+                        await peerConnection.setLocalDescription(answer);
+                        ws.send(JSON.stringify({ roomId, type: 'answer', payload: answer }));
+                    } else if (data.type === 'answer') {
+                        await peerConnection.setRemoteDescription(new RTCSessionDescription(data.payload));
+                    } else if (data.type === 'candidate') {
+                        await peerConnection.addIceCandidate(new RTCIceCandidate(data.payload));
+                    } else if (data.type === 'chat') {
+                        // Display incoming chat messages
+                        const message = data.payload.message;
+                        chatBox.innerHTML += `<div><strong>User:</strong> ${message}</div>`;
+                    } else if (data.type === 'user-left') {
+                        chatBox.innerHTML += `<div><em>A user has left the room.</em></div>`;
+                    }
+                };
+
+                // Create and send offer
+                if (localStream) {
+                    const offer = await peerConnection.createOffer();
+                    await peerConnection.setLocalDescription(offer);
+                    ws.send(JSON.stringify({ roomId, type: 'offer', payload: offer }));
+                }
+            } catch (error) {
+                console.error('Error accessing media devices.', error);
+            }
+        }
+
+        // Toggle Video on/off
+        toggleVideoBtn.addEventListener('click', () => {
+            const videoTrack = localStream.getVideoTracks()[0];
+            videoTrack.enabled = !videoTrack.enabled;
+            toggleVideoBtn.textContent = videoTrack.enabled ? 'Turn Video Off' : 'Turn Video On';
+        });
+
+        // Toggle Mic on/off
+        toggleMicBtn.addEventListener('click', () => {
+            const audioTrack = localStream.getAudioTracks()[0];
+            audioTrack.enabled = !audioTrack.enabled;
+            toggleMicBtn.textContent = audioTrack.enabled ? 'Mute Mic' : 'Unmute Mic';
+        });
+
+        // Screen Sharing
+        shareScreenBtn.addEventListener('click', async () => {
+            if (isScreenSharing) {
+                const screenTrack = screenStream.getTracks()[0];
+                screenTrack.stop();
+                localStream.getTracks().forEach((track) => {
+                    peerConnection.addTrack(track, localStream);
+                });
+                localVideo.srcObject = localStream;
+                isScreenSharing = false;
+                shareScreenBtn.textContent = 'Share Screen';
+            } else {
+                try {
+                    screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+                    screenStream.getTracks().forEach((track) => {
+                        peerConnection.addTrack(track, screenStream);
+                    });
+                    localVideo.srcObject = screenStream;
+                    isScreenSharing = true;
+                    shareScreenBtn.textContent = 'Stop Sharing Screen';
+                } catch (error) {
+                    console.error('Error accessing screen media:', error);
+                }
+            }
+        });
+
+        // Leave the room and close WebSocket connection
+        leaveRoomBtn.addEventListener('click', () => {
+            ws.send(JSON.stringify({ roomId, type: 'leave' }));
+            ws.close();
+            localStream.getTracks().forEach(track => track.stop());
+            if (peerConnection) {
+                peerConnection.close();
+            }
+            window.location.href = '/';  // Redirect to homepage or meeting creation page
+        });
+
+        // Send chat message
+        sendBtn.addEventListener('click', () => {
+            const message = messageInput.value.trim();
+            if (message) {
+                // Send the message to the server
+                ws.send(JSON.stringify({ roomId, type: 'chat', payload: { message } }));
+                // Display the message locally
+                chatBox.innerHTML += `<div><strong>You:</strong> ${message}</div>`;
+                messageInput.value = '';  // Clear the input field
+            }
+        });
+
+        start();
+    </script>
+</body>
+</html>
