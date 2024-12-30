@@ -79,7 +79,7 @@ wss.on('connection', (ws) => {
 app.post('/create-meeting', (req, res) => {
     const roomId = uuidv4();
     rooms[roomId] = [];
-    res.status(201).send({ link: `http://localhost:3000/meet/${roomId}` });
+    res.status(201).send({ link: `https://video-call-meeting.vercel.app:3000/meet/${roomId}` });
 });
 
 // Serve static files from the "public" folder
